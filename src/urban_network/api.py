@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse,json
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from .models import Reading,Segment
+from .errors import SchedulingError
 from .service import NetworkService
 class Handler(BaseHTTPRequestHandler):
     service=NetworkService()
@@ -15,6 +16,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/segments/") and self.path.endswith("/risk"):return self._send(200,self.service.risk_report(self._token(),self.path.split("/")[2]))
             if self.path.startswith("/segments/"):return self._send(200,self.service.segment(self._token(),self.path.split("/",2)[2]))
             return self._send(404,{"error":"not found"})
+        except SchedulingError as e:return self._send(e.status,{"error":str(e)})
         except PermissionError as e:return self._send(403,{"error":str(e)})
         except Exception as e:return self._send(400,{"error":str(e)})
     def do_POST(self):
@@ -28,6 +30,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/segments/") and self.path.endswith("/work-orders"):
                 return self._send(201,self.service.create_work_order(token,self.path.split("/")[2],body["alert_id"],body["assignee"],body.get("priority",3)))
             return self._send(404,{"error":"not found"})
+        except SchedulingError as e:return self._send(e.status,{"error":str(e)})
         except PermissionError as e:return self._send(403,{"error":str(e)})
         except Exception as e:return self._send(400,{"error":str(e)})
 def main():
