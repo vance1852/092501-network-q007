@@ -1,6 +1,6 @@
 """协调管网监测、告警、工单和应急资源分配的应用服务。"""
 from __future__ import annotations
-import hashlib,uuid
+import hashlib,sqlite3,uuid
 from .auth import Auth
 from .models import Reading,Segment,as_dict,utcnow
 from .risk import leak_probability,score_reading
@@ -65,14 +65,22 @@ class NetworkService:
     def allocate(self,token,resource_id,work_order_id,quantity):
         actor=self.auth.require(token,"allocate")
         if quantity<=0:raise ValueError("quantity must be positive")
-        aid="alloc-"+uuid.uuid4().hex[:16]
-        with transaction(self.db):
-            resource=self.db.execute("SELECT available FROM resources WHERE resource_id=?",(resource_id,)).fetchone()
-            if not resource:raise KeyError(resource_id)
-            if not self.db.execute("SELECT 1 FROM work_orders WHERE work_order_id=?",(work_order_id,)).fetchone():raise KeyError(work_order_id)
-            if resource[0]<quantity:raise ValueError("resource capacity exceeded")
-            old=self.db.execute("SELECT allocation_id FROM allocations WHERE resource_id=? AND work_order_id=?",(resource_id,work_order_id)).fetchone()
-            if old:return {"allocation_id":old[0],"duplicate":True}
-            self.db.execute("INSERT INTO allocations VALUES(?,?,?,?,?)",(aid,resource_id,work_order_id,quantity,utcnow())); self.db.execute("UPDATE resources SET available=available-? WHERE resource_id=?",(quantity,resource_id)); audit(self.db,"resource",resource_id,"allocated",actor.user_id,{"work_order_id":work_order_id,"quantity":quantity})
-        return {"allocation_id":aid,"duplicate":False,"resource_id":resource_id,"quantity":quantity}
+        try:
+            with transaction(self.db):
+                resource=self.db.execute("SELECT available FROM resources WHERE resource_id=?",(resource_id,)).fetchone()
+                if not resource:raise KeyError(resource_id)
+                if not self.db.execute("SELECT 1 FROM work_orders WHERE work_order_id=?",(work_order_id,)).fetchone():raise KeyError(work_order_id)
+                old=self.db.execute("SELECT allocation_id,quantity FROM allocations WHERE resource_id=? AND work_order_id=?",(resource_id,work_order_id)).fetchone()
+                if old:
+                    if old[1]!=quantity:raise ValueError(f"allocation quantity conflict: stored {old[1]}, requested {quantity}")
+                    return {"allocation_id":old[0],"duplicate":True,"resource_id":resource_id,"quantity":old[1]}
+                if resource[0]<quantity:raise ValueError("resource capacity exceeded")
+                aid="alloc-"+uuid.uuid4().hex[:16]
+                self.db.execute("INSERT INTO allocations VALUES(?,?,?,?,?)",(aid,resource_id,work_order_id,quantity,utcnow())); self.db.execute("UPDATE resources SET available=available-? WHERE resource_id=?",(quantity,resource_id)); audit(self.db,"resource",resource_id,"allocated",actor.user_id,{"work_order_id":work_order_id,"quantity":quantity})
+            return {"allocation_id":aid,"duplicate":False,"resource_id":resource_id,"quantity":quantity}
+        except sqlite3.IntegrityError:
+            old=self.db.execute("SELECT allocation_id,quantity FROM allocations WHERE resource_id=? AND work_order_id=?",(resource_id,work_order_id)).fetchone()
+            if old is None:raise
+            if old[1]!=quantity:raise ValueError(f"allocation quantity conflict: stored {old[1]}, requested {quantity}")
+            return {"allocation_id":old[0],"duplicate":True,"resource_id":resource_id,"quantity":old[1]}
     def audit_events(self,token,entity_type,entity_id): self.auth.require(token,"read"); return rows(self.db,"SELECT * FROM audit_events WHERE entity_type=? AND entity_id=? ORDER BY event_id",(entity_type,entity_id))
